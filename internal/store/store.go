@@ -321,10 +321,25 @@ func (s *Store) queryReports(ctx context.Context, sql string, args ...any) ([]co
 	return out, rows.Err()
 }
 
+// Reporters returns every reporter in the registry, active or revoked. The
+// role and name come from the registry; the strongest report tier and the
+// asset and report counts are derived from the reserve reports this indexer
+// has seen, so a reporter who has never posted one has tier 0 and zero counts.
+// The profile columns are nullable until the registry exposes them.
 func (s *Store) Reporters(ctx context.Context) ([]coverage.Reporter, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT address, role, name, updated_at FROM reporters
-		WHERE active ORDER BY role, name`)
+		SELECT r.address, r.role, r.name, r.active, r.updated_at,
+		       r.reputation_score, r.expires_at,
+		       COALESCE(agg.tier, 0), COALESCE(agg.asset_count, 0), COALESCE(agg.report_count, 0)
+		FROM reporters r
+		LEFT JOIN (
+		    SELECT reporter, MAX(tier) AS tier,
+		           COUNT(DISTINCT sac) AS asset_count,
+		           COUNT(*) AS report_count
+		    FROM reserve_reports
+		    GROUP BY reporter
+		) agg ON agg.reporter = r.address
+		ORDER BY r.role, r.name, r.address`)
 	if err != nil {
 		return nil, err
 	}
@@ -332,12 +347,59 @@ func (s *Store) Reporters(ctx context.Context) ([]coverage.Reporter, error) {
 	var out []coverage.Reporter
 	for rows.Next() {
 		var r coverage.Reporter
-		var role int16
-		if err := rows.Scan(&r.Address, &role, &r.Name, &r.UpdatedAt); err != nil {
+		var role, tier int32
+		var assetCount, reportCount int64
+		var score *int32
+		var expiresAt *time.Time
+		if err := rows.Scan(&r.Address, &role, &r.Name, &r.Active, &r.UpdatedAt,
+			&score, &expiresAt, &tier, &assetCount, &reportCount); err != nil {
 			return nil, err
 		}
 		r.Role = uint32(role)
+		r.Tier = uint32(tier)
+		r.AssetCount = int(assetCount)
+		r.ReportCount = int(reportCount)
+		r.ReputationScore = score
+		r.ExpiresAt = expiresAt
 		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// Disputes returns one asset's disputes newest-opened first. An empty status
+// returns both open and resolved disputes. The caller asks for limit+1 rows to
+// learn whether another page exists.
+func (s *Store) Disputes(ctx context.Context, sac, status string, limit, offset int) ([]coverage.Dispute, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT sac, reporter, disputer, status, resolution, report_as_of,
+		       hold_until_ledger, opened_ledger, opened_at, resolved_ledger, resolved_at, tx_hash
+		FROM disputes
+		WHERE sac = $1 AND ($2 = '' OR status = $2)
+		ORDER BY opened_at DESC, id DESC
+		LIMIT $3 OFFSET $4`, sac, status, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []coverage.Dispute
+	for rows.Next() {
+		var d coverage.Dispute
+		var holdUntil, openedLedger int64
+		var resolvedLedger *int64
+		var resolvedAt *time.Time
+		if err := rows.Scan(&d.SAC, &d.Reporter, &d.Disputer, &d.Status, &d.Resolution,
+			&d.ReportAsOf, &holdUntil, &openedLedger, &d.OpenedAt,
+			&resolvedLedger, &resolvedAt, &d.TxHash); err != nil {
+			return nil, err
+		}
+		d.HoldUntilLedger = uint32(holdUntil)
+		d.OpenedLedger = uint32(openedLedger)
+		if resolvedLedger != nil {
+			ledger := uint32(*resolvedLedger)
+			d.ResolvedLedger = &ledger
+		}
+		d.ResolvedAt = resolvedAt
+		out = append(out, d)
 	}
 	return out, rows.Err()
 }
