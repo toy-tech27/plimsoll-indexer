@@ -100,7 +100,39 @@ type Reporter struct {
 	Address   string    `json:"address"`
 	Role      uint32    `json:"-"`
 	Name      string    `json:"name"`
+	Active    bool      `json:"active"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// Tier is the strongest reserve-report tier this reporter has posted, or 0
+	// when they have never posted a report. The registry has no tier of its
+	// own: a reporter's weight comes from the reports they sign.
+	Tier uint32 `json:"-"`
+	// AssetCount and ReportCount are derived from the reporter's reserve
+	// reports, so they describe indexed evidence rather than the registry.
+	AssetCount  int `json:"asset_count"`
+	ReportCount int `json:"report_count"`
+	// ReputationScore and ExpiresAt are registry fields that current contract
+	// deployments do not expose. They stay nil rather than being guessed; see
+	// plimsoll-contracts#72 and plimsoll-contracts#92.
+	ReputationScore *int32     `json:"reputation_score"`
+	ExpiresAt       *time.Time `json:"expires_at"`
+}
+
+// Dispute is a challenge to one reserve report, identified by the asset and
+// the report's as_of timestamp. Reporter is the account that signed the
+// disputed report, Disputer the watcher that challenged it.
+type Dispute struct {
+	SAC             string     `json:"-"`
+	Reporter        string     `json:"reporter"`
+	Disputer        string     `json:"disputer"`
+	Status          string     `json:"status"`
+	Resolution      string     `json:"resolution,omitempty"`
+	ReportAsOf      time.Time  `json:"report_as_of"`
+	HoldUntilLedger uint32     `json:"hold_until_ledger,omitempty"`
+	OpenedLedger    uint32     `json:"opened_ledger"`
+	OpenedAt        time.Time  `json:"opened_at"`
+	ResolvedLedger  *uint32    `json:"resolved_ledger,omitempty"`
+	ResolvedAt      *time.Time `json:"resolved_at,omitempty"`
+	TxHash          string     `json:"tx_hash,omitempty"`
 }
 
 // Result mirrors the contract's Coverage struct.

@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/plimsoll-protocol/plimsoll-indexer/internal/coverage"
 	"github.com/plimsoll-protocol/plimsoll-indexer/internal/soroban"
 )
 
@@ -272,6 +273,84 @@ func TestApplyEventsIsIdempotentAcrossReconnect(t *testing.T) {
 	progress, err := s.Progress(ctx, "plimsoll-events")
 	if err != nil || progress.Cursor != "cursor-2" {
 		t.Fatalf("progress after replay = %+v, %v", progress, err)
+	}
+}
+
+func TestDisputesByAssetAndStatus(t *testing.T) {
+	s, url := openStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 11, 25, 6, 0, 0, 0, time.UTC)
+	execSQL(t, url, `
+		INSERT INTO disputes
+		  (event_id, sac, report_as_of, reporter, disputer, status, resolution,
+		   hold_until_ledger, opened_ledger, opened_at, resolved_ledger, resolved_at, tx_hash)
+		VALUES
+		  ('dispute-open', 'CSAC', $1, 'GREPORTER', 'GWATCHER', 'open', '',
+		   200, 150, $2, NULL, NULL, 'tx-open'),
+		  ('dispute-resolved', 'CSAC', $3, 'GREPORTER', 'GWATCHER', 'resolved', 'upheld',
+		   190, 140, $4, 160, $5, 'tx-resolved'),
+		  ('dispute-other', 'COTHER', $1, 'GREPORTER', 'GWATCHER', 'open', '',
+		   200, 150, $2, NULL, NULL, 'tx-other')`,
+		at.Add(-6*time.Hour), at.Add(-3*time.Hour), at.Add(-9*time.Hour), at.Add(-4*time.Hour), at.Add(-time.Hour))
+
+	all, err := s.Disputes(ctx, "CSAC", "", 10, 0)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("all disputes = %d, %v; want 2", len(all), err)
+	}
+	if all[0].Status != "open" || all[1].Status != "resolved" {
+		t.Fatalf("dispute order = %q, %q; want newest open first", all[0].Status, all[1].Status)
+	}
+	if all[1].Resolution != "upheld" || all[1].ResolvedLedger == nil || *all[1].ResolvedLedger != 160 || all[1].ResolvedAt == nil {
+		t.Fatalf("resolved dispute lost its outcome: %+v", all[1])
+	}
+
+	open, err := s.Disputes(ctx, "CSAC", "open", 10, 0)
+	if err != nil || len(open) != 1 || open[0].Status != "open" {
+		t.Fatalf("open disputes = %+v, %v; want one open", open, err)
+	}
+
+	page, err := s.Disputes(ctx, "CSAC", "", 1, 1)
+	if err != nil || len(page) != 1 || page[0].Status != "resolved" {
+		t.Fatalf("second page = %+v, %v; want the resolved dispute", page, err)
+	}
+}
+
+func TestReportersIncludeRevokedAndDerivedCounts(t *testing.T) {
+	s, url := openStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 11, 25, 6, 0, 0, 0, time.UTC)
+	execSQL(t, url, `
+		INSERT INTO reporters (address, role, name, active, updated_ledger, updated_at, reputation_score, expires_at)
+		VALUES
+		  ('GAUD', 1, 'Auditor', true, 100, $1, 7, $2),
+		  ('GONE', 2, 'Revoked', false, 100, $1, NULL, NULL)`,
+		at, at.Add(24*time.Hour))
+	execSQL(t, url, `
+		INSERT INTO reserve_reports
+		  (event_id, sac, tier, amount, as_of, reporter, doc_hash, doc_uri, posted_ledger, posted_at, tx_hash)
+		VALUES
+		  ('r1', 'CSAC', 1, 100, $1, 'GAUD', 'dh', 'https://x', 100, $1, 'tx1'),
+		  ('r2', 'CSAC', 3, 100, $2, 'GAUD', 'dh', 'https://x', 101, $2, 'tx2')`,
+		at.Add(-2*time.Hour), at.Add(-time.Hour))
+
+	list, err := s.Reporters(ctx)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("reporters = %d, %v; want 2 including the revoked one", len(list), err)
+	}
+	byAddress := make(map[string]coverage.Reporter, len(list))
+	for _, r := range list {
+		byAddress[r.Address] = r
+	}
+	aud := byAddress["GAUD"]
+	if !aud.Active || aud.Tier != coverage.TierAuditorSigned || aud.AssetCount != 1 || aud.ReportCount != 2 {
+		t.Fatalf("auditor aggregation = %+v", aud)
+	}
+	if aud.ReputationScore == nil || *aud.ReputationScore != 7 || aud.ExpiresAt == nil {
+		t.Fatalf("auditor profile = %+v, want score 7 and an expiry", aud)
+	}
+	gone := byAddress["GONE"]
+	if gone.Active || gone.Tier != 0 || gone.AssetCount != 0 || gone.ReportCount != 0 || gone.ReputationScore != nil || gone.ExpiresAt != nil {
+		t.Fatalf("revoked reporter aggregation = %+v", gone)
 	}
 }
 
