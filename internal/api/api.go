@@ -86,9 +86,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /openapi.yaml", s.openAPI)
 	mux.HandleFunc("GET /v1/network", s.network)
 	mux.HandleFunc("GET /v1/assets", s.listAssets)
-	// The literal wins over the {sac} wildcard, so "covered" is not treated as
-	// a malformed asset id.
-	mux.HandleFunc("GET /v1/assets/covered", s.coveredAssets)
 	mux.HandleFunc("GET /v1/assets/{sac}", s.getAsset)
 	mux.HandleFunc("HEAD /v1/assets/{sac}", s.headAsset)
 	mux.HandleFunc("GET /v1/assets/{sac}/supply", s.supplyHistory)
@@ -256,6 +253,14 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
+	// Go 1.22+'s ServeMux rejects a literal GET /v1/assets/covered alongside
+	// HEAD /v1/assets/{sac}: the literal is more specific by path but less
+	// specific by method, so neither pattern wins. Dispatch the reserved name
+	// here instead of registering a conflicting literal route.
+	if r.PathValue("sac") == "covered" {
+		s.coveredAssets(w, r)
+		return
+	}
 	sac, ok := parseSAC(w, r)
 	if !ok {
 		return
